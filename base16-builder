@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+set -o errexit -o errtrace -o nounset -o pipefail
+
+function :printf () {
+  # shellcheck disable=SC2059
+  printf -- "$1" "${@:2}"
+}
+
+function :printfln () {
+  # shellcheck disable=SC2059
+  printf -- "${1}\n" "${@:2}"
+}
+
+function :vprintf () {
+  # shellcheck disable=SC2059
+  printf -v "$1" -- "$2" "${@:3}"
+}
+
+function :println () {
+  :printfln '%s' "$@"
+}
+
+function :log () {
+  :println "$@" 1>&2
+}
+
+function :die () {
+  :log "$@"
+  exit 1
+}
+
+function :bc () {
+  :printfln "$1" "${@:2}" | bc --mathlib
+}
+
+function :hex:rgb () {
+  :bc 'ibase=16; %s' "$1"
+}
+
+function :rgb:dec () {
+  :bc 'scale=2; %d/255' "$1" | awk '{printf "%0.2f\n", $0}'
+}
+
+if ! read -t 0 || [[ ! "${1:+"x"}" ]]
+then :die "Usage: cat scheme.yaml | ${0} template.tmpl"
+elif [[ ! -r "$1" ]]
+then :die "Error: Unable to read template file ${1}"
+fi
+
+readonly templateFile="$1"
+
+declare -A schemeData=()
+
+while IFS= read -r line || [[ "${line:+"x"}" ]]
+do
+  if
+    : '^(scheme|author|base0[0-9a-fA-F])[[:space:]]*:[[:space:]]*(.+)'
+    [[ "$line" =~ $_ ]]
+  then
+    key="${BASH_REMATCH[1]}" value="${BASH_REMATCH[2]}"
+
+    if
+      : '"(.+)"'
+      [[ "$value" =~ $_ ]]
+    then value="${BASH_REMATCH[1]}"
+    elif
+      : "'"'(.+)'"'"
+      [[ "$value" =~ $_ ]]
+    then value="${BASH_REMATCH[1]}"
+    fi
+
+    schemeData["$key"]="$value"
+  fi
+done
+
+declare -A replacements=()
+
+replacements["scheme-name"]="${schemeData["scheme"]:-"Unknown"}"
+replacements["scheme-author"]="${schemeData["author"]:-"Unknown"}"
+
+: "${replacements["scheme-name"],,}"
+replacements["scheme-slug"]="${_//" "/"-"}"
+
+for i in {0..15}
+do
+  :vprintf key 'base%02X' "$i"
+
+  if [[ ! "${schemeData["$key"]:+"x"}" ]]
+  then :die "Error: ${key} not found"
+  fi
+
+  if
+    : '#?([0-9a-fA-F]{6})'
+    [[ ! "${schemeData["$key"]}" =~ $_ ]]
+  then :die "Error: Invalid hex color: ${schemeData["$key"]}"
+  fi
+
+  : "${BASH_REMATCH[1]^^}"
+
+  hexR="${_:0:2}"            hexG="${_:2:2}"            hexB="${_:4:2}"
+  rgbR="$(:hex:rgb "$hexR")" rgbG="$(:hex:rgb "$hexG")" rgbB="$(:hex:rgb "$hexB")"
+  decR="$(:rgb:dec "$rgbR")" decG="$(:rgb:dec "$rgbG")" decB="$(:rgb:dec "$rgbB")"
+
+  replacements["${key}-hex"]="${hexR}${hexG}${hexB}"
+  replacements["${key}-hex-bgr"]="${hexB}${hexG}${hexR}"
+  replacements["${key}-hex-r"]="$hexR"
+  replacements["${key}-hex-g"]="$hexG"
+  replacements["${key}-hex-b"]="$hexB"
+  replacements["${key}-rgb-r"]="$rgbR"
+  replacements["${key}-rgb-g"]="$rgbG"
+  replacements["${key}-rgb-b"]="$rgbB"
+  replacements["${key}-dec-r"]="$decR"
+  replacements["${key}-dec-g"]="$decG"
+  replacements["${key}-dec-b"]="$decB"
+
+  # TODO
+  replacements["${key}-hsl-h"]=
+  replacements["${key}-hsl-s"]=
+  replacements["${key}-hsl-l"]=
+done
+
+declare -a sedOpts=()
+
+for search in "${!replacements[@]}"
+do
+  : "${replacements["$search"]}"
+  sedOpts+=(-e "s/{{${search}}}/${_//\//\\\/}/")
+done
+
+sed "${sedOpts[@]}" "$templateFile"
